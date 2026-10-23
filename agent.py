@@ -1,128 +1,197 @@
 
 import os
-from google import genai
+import time
+
+from groq import Groq
+
 from tools import search_web
 
 
-MODEL = "gemini-3.8-flash"
+MODEL = "openai/gpt-oss-20b"
+MAX_RETRIES = 2
+MAX_SOURCES = 4
+MAX_SNIPPET_CHARS = 700
 
 
 def get_client():
-    api_key = os.getenv("GEMINI_API_KEY")
+    """Create a Groq client."""
+    api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
-        raise ValueError("GEMINI_API_KEY is missing from your .env file.")
+        raise ValueError("GROQ_API_KEY is missing.")
 
-    return genai.Client(api_key=api_key)
+    return Groq(api_key=api_key)
 
 
-def plan_research(question: str, client) -> list[str]:
-    """Ask the LLM to break a research question into smaller queries."""
+def generate_with_retry(client, prompt, progress_callback=None):
+    """Retry temporary API errors a limited number of times."""
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+                max_completion_tokens=4000,
+            )
 
-    prompt = f"""
-    You are a research planning assistant.
+            return response.choices[0].message.content
 
-    Break this research question into exactly 3 focused web search queries.
-    Each query should investigate a different aspect of the question.
-    Make the queries specific enough to find useful evidence.
+        except Exception as error:
+            message = str(error).lower()
 
-    Return only the 3 queries, one per line.
-    Do not add numbering, introductions, or explanations.
+            temporary = any(
+                term in message
+                for term in (
+                    "429",
+                    "rate_limit",
+                    "rate limit",
+                    "503",
+                    "unavailable",
+                    "500",
+                    "internal",
+                    "504",
+                    "deadline_exceeded",
+                    "timeout",
+                    "timed out",
+                )
+            )
 
-    Research question: {question}
-    """
+            if not temporary or attempt >= MAX_RETRIES:
+                raise
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-    )
+            delay = 2 ** (attempt + 1)
 
+            if progress_callback:
+                progress_callback(
+                    f"AI service temporarily unavailable. "
+                    f"Retrying in {delay} seconds "
+                    f"(attempt {attempt + 2} of {MAX_RETRIES + 1})..."
+                )
+
+            time.sleep(delay)
+
+
+def research(question: str, progress_callback=None) -> dict:
+    """Search the web and synthesize a concise research report."""
+
+    if progress_callback:
+        progress_callback("Preparing focused web searches...")
+
+    # Generate three search queries without using an LLM request.
     queries = [
-        line.strip().lstrip("0123456789.-) ")
-        for line in response.text.splitlines()
-        if line.strip()
+        question,
+        f"{question} empirical research evidence",
+        f"{question} limitations contradictory findings",
     ]
 
-    queries = [q for q in queries if q]
-
-    if not queries:
-        return [question]
-
-    return queries[:3]
-
-
-def research(question: str) -> dict:
-    """Plan research, search the web, and synthesize a report."""
-
-    client = get_client()
-
-    # Step 1: Plan the research.
-    queries = plan_research(question, client)
-
-    # Step 2: Execute the search tool for each query.
     all_sources = []
+    failed_searches = []
 
-    for query in queries:
-        results = search_web(query, max_results=4)
+    for index, query in enumerate(queries, start=1):
+        if progress_callback:
+            progress_callback(
+                f"Searching the web: query {index} of {len(queries)}..."
+            )
 
-        for result in results:
-            if result["url"] and not any(
-                source["url"] == result["url"]
-                for source in all_sources
-            ):
-                all_sources.append(result)
+        try:
+            results = search_web(query, max_results=3)
+
+            for result in results:
+                url = result.get("url", "")
+
+                if url and not any(
+                    source["url"] == url for source in all_sources
+                ):
+                    all_sources.append(result)
+
+        except Exception as error:
+            failed_searches.append(query)
+
+            if progress_callback:
+                progress_callback(
+                    f"Search {index} failed; continuing with available "
+                    f"evidence. Details: {error}"
+                )
 
     if not all_sources:
-        raise ValueError(
-            "No web sources were found. Try a different research question."
+        raise RuntimeError(
+            "No web sources could be retrieved. Check your Tavily API key, "
+            "internet connection, quota, and application logs."
         )
 
-    # Step 3: Give the evidence to the LLM for synthesis.
-    evidence = "\n\n".join(
-        f"TITLE: {source['title']}\n"
-        f"URL: {source['url']}\n"
-        f"CONTENT: {source['content']}"
-        for source in all_sources
-    )
+    # Limit the evidence sent to the LLM to control token usage.
+    selected_sources = all_sources[:MAX_SOURCES]
+
+    if progress_callback:
+        progress_callback(
+            f"Collected {len(all_sources)} unique sources. "
+            f"Using {len(selected_sources)} for report generation..."
+        )
+
+    evidence_parts = []
+
+    for index, source in enumerate(selected_sources, start=1):
+        snippet = source.get("content", "")[:MAX_SNIPPET_CHARS]
+
+        evidence_parts.append(
+            f"SOURCE {index}\n"
+            f"TITLE: {source.get('title', 'Untitled')}\n"
+            f"URL: {source['url']}\n"
+            f"CONTENT: {snippet}"
+        )
+
+    evidence = "\n\n".join(evidence_parts)
 
     synthesis_prompt = f"""
-    You are a careful research analyst.
+You are ResearchPilot, an evidence-based research assistant.
 
-    Answer the user's question using the supplied web search evidence.
+Research question:
+{question}
 
-    USER QUESTION:
-    {question}
+Evidence from web sources:
+{evidence}
 
-    RESEARCH QUERIES USED:
-    {queries}
+Write a concise but useful research report containing:
 
-    WEB EVIDENCE:
-    {evidence}
+1. Executive summary.
+2. Key findings organized by theme.
+3. Relevant source links using Markdown.
+4. Contradictory findings, evidence limitations, and uncertainty.
+5. Practical implications.
 
-    Write a concise research report with:
-    1. An executive summary.
-    2. Key findings with inline source links using Markdown.
-    3. Areas of agreement or disagreement across sources.
-    4. Limitations and unanswered questions.
+Requirements:
+- Base factual claims on the supplied source material.
+- Use only the supplied source URLs for citations.
+- Do not invent studies, statistics, quotations, or citations.
+- Distinguish empirical findings from interpretations.
+- Identify important questions the available evidence cannot answer.
+- If the sources do not adequately answer part of the question,
+  acknowledge the gap rather than inventing an answer.
+"""
 
-    Rules:
-    - Cite claims using only URLs supplied in the evidence.
-    - Never invent a source, quote, statistic, or URL.
-    - Distinguish evidence from your own interpretation.
-    - If evidence is insufficient, explicitly say so.
-    - Do not claim that a source supports something its content
-      does not establish.
-    - Be concise, clear, and analytical.
-    """
+    if progress_callback:
+        progress_callback("Generating the research report with Groq...")
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=synthesis_prompt,
+    report = generate_with_retry(
+        get_client(),
+        synthesis_prompt,
+        progress_callback,
     )
+
+    if not report or not report.strip():
+        raise RuntimeError("Groq returned an empty research report.")
+
+    if progress_callback:
+        progress_callback("Research report complete.")
 
     return {
         "question": question,
         "queries": queries,
-        "sources": all_sources,
-        "report": response.text or "The model returned an empty report.",
+        "sources": selected_sources,
+        "report": report,
+        "failed_searches": failed_searches,
     }

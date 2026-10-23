@@ -1,4 +1,5 @@
 streamlit
-google-genai
+groq
 tavily-python
 python-dotenv
+requests
