@@ -1,10 +1,18 @@
 
+import os
 import streamlit as st
 from dotenv import load_dotenv
 from agent import research
 
-
 load_dotenv()
+
+# Load secrets configured on Streamlit Cloud.
+for key in ("GEMINI_API_KEY", "TAVILY_API_KEY"):
+    try:
+        if key in st.secrets:
+            os.environ[key] = st.secrets[key]
+    except Exception:
+        pass
 
 st.set_page_config(
     page_title="ResearchPilot",
