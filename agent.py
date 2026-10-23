@@ -4,7 +4,7 @@ from google import genai
 from tools import search_web
 
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.8-flash"
 
 
 def get_client():
