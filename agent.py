@@ -6,7 +6,11 @@ from datetime import date
 from groq import Groq
 
 from academic_sources import search_academic
-from report_generator import build_report_prompt, target_word_count
+from report_generator import (
+    build_report_prompt,
+    target_word_count,
+    validate_abstract_word_count,
+)
 from source_quality import (
     deduplicate_sources,
     evidence_coverage,
@@ -247,6 +251,7 @@ def research(
     max_age_years: int | None = None,
     output_mode: str = "full_report",
     page_count: int = 5,
+    abstract_word_count: int = 1000,
     progress_callback=None,
 ) -> dict:
     """Search, evaluate and synthesize evidence into a report."""
@@ -269,6 +274,8 @@ def research(
 
     if output_mode == "full_report":
         target_word_count(page_count)
+    else:
+        validate_abstract_word_count(abstract_word_count)
 
     if progress_callback:
         progress_callback("Planning the research searches...")
@@ -379,11 +386,15 @@ def research(
         evidence=evidence,
         output_mode=output_mode,
         page_count=page_count,
+        abstract_word_count=abstract_word_count,
     )
 
     if progress_callback:
         if output_mode == "abstract":
-            progress_callback("Generating a research abstract with Groq...")
+            progress_callback(
+                f"Generating an approximately {abstract_word_count}-word "
+                "academic abstract with Groq..."
+            )
         else:
             progress_callback(
                 f"Generating an approximately {page_count}-page "
@@ -409,6 +420,9 @@ def research(
         "max_age_years": max_age_years,
         "output_mode": output_mode,
         "page_count": page_count if output_mode == "full_report" else None,
+        "abstract_word_count": (
+            abstract_word_count if output_mode == "abstract" else None
+        ),
         "queries": attempted_queries,
         "follow_up_queries": follow_up_queries,
         "sources": selected_sources,

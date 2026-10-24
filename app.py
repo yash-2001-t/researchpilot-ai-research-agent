@@ -57,8 +57,10 @@ if st.session_state.get("research_owner_id") != user_id:
         "research_result",
         "research_metadata",
         "opened_library_report",
+        "opened_library_report_id",
         "report_title_input",
         "last_saved_report_id",
+        "confirm_delete_report_id",
     ):
         st.session_state.pop(key, None)
 
@@ -177,6 +179,8 @@ with st.sidebar:
             "research_result",
             "research_metadata",
             "opened_library_report",
+            "opened_library_report_id",
+            "confirm_delete_report_id",
         ):
             st.session_state.pop(key, None)
         st.rerun()
@@ -186,7 +190,6 @@ with st.sidebar:
 # Workspace 1: New research
 # ---------------------------------------------------------
 if workspace == "New research":
-    # Leaving the library viewer returns to the research workspace.
     st.session_state["library_view"] = "list"
 
     st.title("🔎 ResearchPilot")
@@ -195,6 +198,50 @@ if workspace == "New research":
         "Investigate a topic using general web sources, academic literature, "
         "or both. Customize your report and download it for later use."
     )
+
+    # These controls are OUTSIDE the form so switching modes reruns
+    # Streamlit immediately and changes the displayed length selector.
+    output_mode_label = st.radio(
+        "What would you like to generate?",
+        options=["Full report", "Abstract only"],
+        horizontal=True,
+        key="output_mode_selector",
+    )
+
+    if output_mode_label == "Full report":
+        page_count = st.select_slider(
+            "Approximate Word-document length",
+            options=list(range(1, 16)),
+            value=5,
+            format_func=lambda value: (
+                f"{value} page" if value == 1 else f"{value} pages"
+            ),
+            key="report_page_count",
+        )
+        abstract_word_count = 1000
+
+        st.caption(
+            "Each page represents approximately 400 words. "
+            "Actual Word-document pagination may vary."
+        )
+    else:
+        page_count = 5
+
+        abstract_word_count = st.select_slider(
+            "Target abstract length",
+            options=list(range(200, 5001, 200)),
+            value=1000,
+            format_func=lambda value: f"{value:,} words",
+            key="abstract_word_count",
+        )
+
+        st.caption(
+            "The abstract uses a title, an Abstract heading, and continuous "
+            "academic prose without bullets or additional section headings. "
+            "Longer selections produce extended abstracts or research syntheses."
+        )
+
+    st.divider()
 
     with st.form("research_form"):
         input_mode_label = st.radio(
@@ -229,31 +276,9 @@ if workspace == "New research":
             ],
         )
 
-        st.divider()
-
-        output_mode_label = st.radio(
-            "What would you like to generate?",
-            options=["Full report", "Abstract only"],
-            horizontal=True,
-        )
-
-        if output_mode_label == "Full report":
-            page_count = st.select_slider(
-                "Approximate Word-document length",
-                options=[2, 5, 10, 15],
-                value=5,
-                format_func=lambda value: f"{value} pages",
-            )
-        else:
-            page_count = 5
-            st.caption(
-                "Abstract mode produces a standalone abstract of "
-                "approximately 200–300 words. Page length does not apply."
-            )
-
         st.caption(
-            "Page counts are approximate. With a date limit active, "
-            "sources without a verifiable publication date are excluded."
+            "With a publication-age limit active, sources without a "
+            "verifiable publication date are excluded."
         )
 
         submitted = st.form_submit_button(
@@ -306,6 +331,7 @@ if workspace == "New research":
                     max_age_years=max_age_years,
                     output_mode=output_mode,
                     page_count=page_count,
+                    abstract_word_count=abstract_word_count,
                     progress_callback=update_progress,
                 )
 
@@ -317,13 +343,20 @@ if workspace == "New research":
                     "source_types": source_types,
                     "max_age_years": max_age_years,
                     "output_mode": output_mode,
-                    "page_count": page_count,
+                    "page_count": (
+                        page_count if output_mode == "full_report" else None
+                    ),
+                    "abstract_word_count": (
+                        abstract_word_count
+                        if output_mode == "abstract"
+                        else None
+                    ),
                     "date_filter_label": date_filter_label,
                     "source_type_label": source_type_label,
                     "output_mode_label": output_mode_label,
                 }
-                st.session_state.pop("report_title_input", None)
 
+                st.session_state.pop("report_title_input", None)
                 status.update(label="Research complete!", state="complete")
 
             except Exception as error:
@@ -353,7 +386,7 @@ if workspace == "New research":
     metadata = st.session_state.get("research_metadata")
 
     if result and metadata and metadata.get("user_id") == user_id:
-        st.success("Research report ready!")
+        st.success("Research output ready!")
 
         stats = result["source_stats"]
         metrics = st.columns(3)
@@ -369,6 +402,20 @@ if workspace == "New research":
             "Keyword coverage estimates vocabulary overlap. "
             "It is not a measure of accuracy or research completeness."
         )
+
+        if result["output_mode"] == "abstract":
+            actual_target = (
+                result.get("abstract_word_count")
+                or metadata.get("abstract_word_count")
+                or 1000
+            )
+            st.caption(f"Requested abstract length: {actual_target:,} words")
+        else:
+            actual_pages = result.get("page_count") or metadata.get("page_count")
+            st.caption(
+                f"Requested report length: {actual_pages} pages "
+                f"(approximately {actual_pages * 400:,} words)"
+            )
 
         st.markdown("## Research output")
         st.markdown(result["report"])
@@ -404,14 +451,23 @@ if workspace == "New research":
                         if metadata["output_mode"] == "full_report"
                         else None
                     ),
+                    abstract_word_count=(
+                        metadata["abstract_word_count"]
+                        if metadata["output_mode"] == "abstract"
+                        else None
+                    ),
                     research_settings={
                         "date_filter": metadata["date_filter_label"],
                         "source_type_label": metadata["source_type_label"],
                         "output_mode_label": metadata["output_mode_label"],
+                        "page_count": metadata["page_count"],
+                        "abstract_word_count": metadata["abstract_word_count"],
                     },
                 )
+
                 st.session_state["last_saved_report_id"] = saved["id"]
                 st.success(f"Report saved successfully: {saved['title']}")
+
             except Exception as error:
                 st.error(f"Could not save report: {error}")
 
@@ -592,9 +648,22 @@ else:
         if created_at:
             st.caption(f"Created: {created_at}")
 
+        output_mode = saved_report.get("output_mode", "full_report")
+        page_count = saved_report.get("page_count")
+        abstract_word_count = saved_report.get("abstract_word_count")
+
+        if output_mode == "abstract" and abstract_word_count:
+            st.caption(
+                f"Requested abstract length: {abstract_word_count:,} words"
+            )
+        elif output_mode == "full_report" and page_count:
+            st.caption(
+                f"Requested report length: {page_count} pages "
+                f"(approximately {page_count * 400:,} words)"
+            )
+
         report_content = saved_report.get("report_content", "")
         sources = saved_report.get("sources") or []
-        output_mode = saved_report.get("output_mode", "full_report")
 
         st.divider()
         st.markdown(report_content)
