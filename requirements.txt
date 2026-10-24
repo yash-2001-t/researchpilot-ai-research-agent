@@ -2,4 +2,7 @@ streamlit
 groq
 python-dotenv
 requests
+python-docx
 pytest
+supabase
+extra-streamlit-components

@@ -6,6 +6,7 @@ from datetime import date
 from groq import Groq
 
 from academic_sources import search_academic
+from report_generator import build_report_prompt, target_word_count
 from source_quality import (
     deduplicate_sources,
     evidence_coverage,
@@ -45,7 +46,7 @@ def generate_with_retry(client, prompt, progress_callback=None):
                         "content": prompt,
                     }
                 ],
-                max_completion_tokens=4000,
+                max_completion_tokens=8000,
             )
 
             return response.choices[0].message.content
@@ -216,7 +217,7 @@ def collect_sources(
 
 
 def prepare_sources(query, all_sources, max_age_years):
-    """Deduplicate, apply the date filter, rank and assess coverage."""
+    """Deduplicate, filter, rank and assess evidence coverage."""
     unique_sources = deduplicate_sources(all_sources)
 
     filtered_sources, excluded_count, undated_count = filter_by_date(
@@ -230,14 +231,12 @@ def prepare_sources(query, all_sources, max_age_years):
         max_sources=MAX_SOURCES,
     )
 
-    coverage = evidence_coverage(query, ranked_sources)
-
     return {
         "unique_sources": unique_sources,
         "ranked_sources": ranked_sources,
         "excluded_count": excluded_count,
         "undated_count": undated_count,
-        "coverage": coverage,
+        "coverage": evidence_coverage(query, ranked_sources),
     }
 
 
@@ -246,9 +245,11 @@ def research(
     input_mode: str = "question",
     source_types: str = "both",
     max_age_years: int | None = None,
+    output_mode: str = "full_report",
+    page_count: int = 5,
     progress_callback=None,
 ) -> dict:
-    """Search, evaluate and synthesize evidence into a research report."""
+    """Search, evaluate and synthesize evidence into a report."""
     user_input = user_input.strip()
 
     if not user_input:
@@ -262,6 +263,12 @@ def research(
 
     if max_age_years not in (None, 1, 3, 5, 10):
         raise ValueError("Unsupported publication-age filter.")
+
+    if output_mode not in ("abstract", "full_report"):
+        raise ValueError("Unsupported report output mode.")
+
+    if output_mode == "full_report":
+        target_word_count(page_count)
 
     if progress_callback:
         progress_callback("Planning the research searches...")
@@ -292,7 +299,6 @@ def research(
     follow_up_queries = []
     follow_up_used = False
 
-    # One bounded follow-up round when the initial evidence set appears weak.
     needs_follow_up = (
         len(prepared["ranked_sources"]) < 5
         or prepared["coverage"] < 0.30
@@ -338,7 +344,7 @@ def research(
     if not selected_sources:
         raise RuntimeError(
             "No usable sources were found for the selected settings. "
-            "Try a broader topic, a longer publication window, or both "
+            "Try broader keywords, a longer publication window, or both "
             "source types. Check the search error details if available."
         )
 
@@ -353,55 +359,36 @@ def research(
 
     for index, source in enumerate(selected_sources, start=1):
         snippet = source.get("content", "")[:MAX_SNIPPET_CHARS]
-        publication_date = (
-            source.get("publication_date") or "Date not verified"
-        )
-        source_type = source.get("source_type", "web")
 
         evidence_parts.append(
             f"SOURCE {index}\n"
             f"TITLE: {source.get('title', 'Untitled')}\n"
             f"URL: {source.get('url', '')}\n"
-            f"SOURCE TYPE: {source_type}\n"
-            f"PUBLICATION DATE: {publication_date}\n"
-            f"SELECTION REASON: {source.get('selection_reason', '')}\n"
+            f"SOURCE TYPE: {source.get('source_type', 'web')}\n"
+            f"PUBLICATION DATE: "
+            f"{source.get('publication_date') or 'Date not verified'}\n"
+            f"SELECTION REASON: "
+            f"{source.get('selection_reason', '')}\n"
             f"CONTENT:\n{snippet}"
         )
 
     evidence = "\n\n".join(evidence_parts)
 
-    synthesis_prompt = f"""
-You are ResearchPilot, an evidence-based research assistant.
-
-Research question or topic:
-{research_question}
-
-Evidence from retrieved sources:
-{evidence}
-
-Write a clear, balanced research report with:
-1. An executive summary.
-2. Key findings organized into meaningful themes.
-3. Evidence and examples supporting the findings.
-4. Contradictory findings, limitations, and uncertainty.
-5. Practical implications or conclusions relevant to the topic.
-
-Source and citation rules:
-- Use only the source URLs supplied in the evidence.
-- Link factual claims to relevant sources using Markdown links.
-- Never invent studies, statistics, quotations, authors, or citations.
-- Do not treat citation count or website reputation as proof of correctness.
-- Distinguish empirical evidence from opinion and interpretation.
-- For academic works, do not claim to have read the full paper when only
-  its abstract or metadata was provided.
-- Clearly state when the supplied evidence is insufficient to support
-  a conclusion.
-- Identify any important aspects of the question that remain unanswered.
-- Do not imply that the sources represent an exhaustive literature review.
-"""
+    synthesis_prompt = build_report_prompt(
+        question=research_question,
+        evidence=evidence,
+        output_mode=output_mode,
+        page_count=page_count,
+    )
 
     if progress_callback:
-        progress_callback("Generating the research report with Groq...")
+        if output_mode == "abstract":
+            progress_callback("Generating a research abstract with Groq...")
+        else:
+            progress_callback(
+                f"Generating an approximately {page_count}-page "
+                "research report with Groq..."
+            )
 
     report = generate_with_retry(
         get_client(),
@@ -410,7 +397,7 @@ Source and citation rules:
     )
 
     if not report or not report.strip():
-        raise RuntimeError("Groq returned an empty research report.")
+        raise RuntimeError("Groq returned an empty report.")
 
     if progress_callback:
         progress_callback("Research report complete.")
@@ -420,6 +407,8 @@ Source and citation rules:
         "input_mode": input_mode,
         "source_types": source_types,
         "max_age_years": max_age_years,
+        "output_mode": output_mode,
+        "page_count": page_count if output_mode == "full_report" else None,
         "queries": attempted_queries,
         "follow_up_queries": follow_up_queries,
         "sources": selected_sources,
