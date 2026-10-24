@@ -1,5 +1,5 @@
 streamlit
 groq
-tavily-python
 python-dotenv
 requests
+pytest
